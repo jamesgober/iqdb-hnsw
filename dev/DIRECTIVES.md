@@ -73,7 +73,7 @@ Tier 1 covers the entire common case in a handful of calls, with no builder and 
 
 ## 8. Project-specific invariants
 
-Stack: Rust edition 2024, MSRV 1.85. Errors via `error-forge`. Tests via `cargo test` + `criterion` + `loom` + `proptest`.
+Stack: Rust edition 2024, MSRV 1.87. Errors via `error-forge`. Tests via `cargo test` + `criterion` + `loom` + `proptest`.
 
 - Recall against `iqdb-flat` ground truth is non-negotiable and benchmarked on SIFT1M/GIST1M.
 - Filtered search is evaluated during traversal, the hard path, because filter-after-retrieval collapses recall when the filter is selective.
