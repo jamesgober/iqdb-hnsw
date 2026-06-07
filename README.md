@@ -26,10 +26,10 @@
     <br>
     <hr>
     <p>
-        <strong>MSRV is 1.87+</strong> (Rust 2024 edition). Production ANN. Recall-validated against flat. Filtered traversal.
+        <strong>MSRV is 1.87+</strong> (Rust 2024 edition). Production ANN. Recall-validated. Filtered traversal. Deterministic.
     </p>
     <blockquote>
-        <strong>Status: pre-1.0, in active development.</strong> The public API is being designed across the 0.x series and frozen at <code>1.0.0</code>. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
+        <strong>Status: pre-1.0, API frozen.</strong> The graph, insert, beam search, tombstone delete, and filtered traversal are implemented, tested, and recall-validated, and the public API is committed as of <code>v0.6.0</code> (only additive, non-breaking changes through 1.x). See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
     </blockquote>
 </div>
 
@@ -38,12 +38,12 @@
 
 <h2>What it does</h2>
 
-- **HNSW graph** &mdash; hierarchical navigable small-world graph per Malkov & Yashunin
-- **Standard knobs** &mdash; M, efConstruction, efSearch, optional fixed seed for reproducibility
-- **Insert / search / delete** &mdash; deletion via tombstones with compaction
-- **Filtered traversal** &mdash; filter during traversal via iqdb-filter, not just after retrieval
-- **Competitive** &mdash; targets within 2x of hnswlib on standard benchmarks
-
+- **HNSW graph** &mdash; hierarchical navigable small-world graph per Malkov & Yashunin (2016), built incrementally at insert time
+- **Standard knobs** &mdash; `m`, `ef_construction`, `ef_search`, `filter_widen`, and a fixed `seed` for reproducibility
+- **Insert / search / delete** &mdash; beam-search top-`k`; tombstone deletion (graph-repair compaction is a tracked post-freeze optimisation)
+- **Deterministic** &mdash; a seeded SplitMix64 (no `rand` dep); same insert order + seed ⇒ byte-identical graph and identical results
+- **Filtered traversal** &mdash; metadata filtering via `iqdb-filter`, with the beam widened by `filter_widen` to mitigate post-filter under-return
+- **One ordering invariant** &mdash; all metric math via `iqdb-distance`; `DotProduct` negated so `Hit.distance` is smaller-is-nearer across all five metrics
 
 <br>
 
@@ -51,14 +51,37 @@
 
 ```toml
 [dependencies]
-iqdb-hnsw = "0.1"
+iqdb-hnsw = "0.6"
+```
+
+<br>
+
+## Quick start
+
+```rust
+use std::sync::Arc;
+
+use iqdb_hnsw::{HnswConfig, HnswIndex};
+use iqdb_index::{Index, IndexCore};
+use iqdb_types::{DistanceMetric, SearchParams, VectorId};
+
+// Default operating point (m=16, ef_construction=200, ef_search=64), or tune it:
+let cfg = HnswConfig::default().with_ef_search(128);
+let mut idx = HnswIndex::new(2, DistanceMetric::Euclidean, cfg)?;
+
+idx.insert(VectorId::from(1u64), Arc::<[f32]>::from(&[0.0, 0.0][..]), None)?;
+idx.insert(VectorId::from(2u64), Arc::<[f32]>::from(&[3.0, 4.0][..]), None)?;
+idx.insert(VectorId::from(3u64), Arc::<[f32]>::from(&[1.0, 0.0][..]), None)?;
+
+let hits = idx.search(&[0.0, 0.0], &SearchParams::new(2, DistanceMetric::Euclidean))?;
+assert_eq!(hits[0].id, VectorId::U64(1)); // nearest to the origin
 ```
 
 <br>
 
 ## Status
 
-This is the <code>v0.1.0</code> scaffold: structure, tooling, and quality gates are in place; the implementation lands across the 0.x series per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a> and <a href="./docs/API.md"><code>docs/API.md</code></a>.
+<code>v0.6.0</code> is **feature-complete with the public API frozen**: the multi-layer graph, insert with the Alg 4 neighbour heuristic, beam search, tombstone delete, and `iqdb-filter` traversal all ship, wired to the stable (`1.0`) iQDB spine. Correctness is pinned by a headline recall@10 ≥ 0.95 gate across all five metrics (against an exact full-scan oracle), plus determinism, contract, edge, layer-distribution, and tombstone suites. Zero `unsafe`. The committed surface is recorded in the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>; only additive, non-breaking changes are made through 1.x. Remaining work to 1.0 is real-data recall validation (SIFT/GIST), integration against the engine, and polish — see <a href="./docs/API.md"><code>docs/API.md</code></a>.
 
 <hr>
 <br>
@@ -72,13 +95,13 @@ This is the <code>v0.1.0</code> scaffold: structure, tooling, and quality gates 
 - `iqdb-index` &mdash; implements the trait
 - `iqdb-filter` &mdash; filter during graph traversal
 
-It is unblocked once index/distance/filter exist; no external dependency.
+and is consumed by `iqdb` for approximate search and by `iqdb-build` for bulk graph construction. Persistence is the separate `iqdb-persist` crate's job.
 
 <br>
 
-## Contributing
+## Standards
 
-See <a href="./dev/DIRECTIVES.md"><code>dev/DIRECTIVES.md</code></a> for engineering standards and the definition of done. Before a PR: `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-features` must be clean.
+Built to the iQDB Rust standard. See <a href="./REPS.md"><code>REPS.md</code></a> (Rust Efficiency &amp; Performance Standards) and <a href="./dev/DIRECTIVES.md"><code>dev/DIRECTIVES.md</code></a> for the engineering law and the definition of done. Before a PR: `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-features` must be clean.
 
 <br>
 

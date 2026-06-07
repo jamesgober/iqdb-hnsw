@@ -15,38 +15,103 @@ Compiles, CI green, structure correct, no domain logic.
 
 ---
 
-## v0.2.0 -- graph storage + insert + search (single-threaded) (THE HARD PART, NOT DEFERRED)
+## v0.2.0 -- graph storage + insert + search (single-threaded) (THE HARD PART, NOT DEFERRED) (DONE)
+
+Columnar graph storage (`Vec<Arc<[f32]>>` rows + parallel `Vec`s + per-node
+adjacency), INSERT-NODE (Alg 1) with the layer-assignment SplitMix64 draw, and
+SEARCH (Alg 5 greedy descent + Alg 2 SEARCH-LAYER) all land here.
 
 Exit criteria:
-- [ ] Every public item has rustdoc + a runnable example.
-- [ ] Core invariants property-tested.
+- [x] Every public item has rustdoc + a runnable example.
+- [x] Core invariants property-tested.
+
+Landed together with 0.3/0.4/0.5 in the consolidated v0.6.0 release (see CHANGELOG).
 
 ---
 
-## v0.3.0 -- neighbor-selection heuristics + tombstone delete + compaction
+## v0.3.0 -- neighbor-selection heuristics + tombstone delete (+ compaction DEFERRED) (DONE)
 
 Exit criteria:
-- [ ] New surface tested and benchmarked where it is a hot path.
+- [x] New surface tested and benchmarked where it is a hot path.
+
+The Alg 4 diverse-neighbour heuristic (with bidirectional linking + overflow
+re-pruning) and tombstone delete shipped in v0.6.0.
+
+**Deferral (recorded per the anti-deferral rule).** *Slot compaction* (reclaiming
+tombstoned rows + graph-repair delete) is deferred to a post-freeze internal
+optimisation. Rationale: delete is tombstone-only — a tombstoned node stays in
+graph traversal for connectivity but is never returned as a `Hit`, so the
+*observable* deletion contract holds without compaction. Reclaiming the slot is a
+memory optimisation, internal and non-breaking, that can land in any later
+0.x/1.x. It does not block the 0.5 API freeze.
 
 ---
 
-## v0.4.0 -- filtered traversal via iqdb-filter + feature freeze
+## v0.4.0 -- filtered traversal via iqdb-filter + feature freeze (DONE)
 
 Exit criteria:
-- [ ] No `todo!`/`unimplemented!`. Feature freeze declared.
+- [x] No `todo!`/`unimplemented!`. Feature freeze declared.
+
+Metadata filtering via `iqdb-filter` (post-filter, with the beam widened by
+`HnswConfig::filter_widen` to mitigate under-return) shipped in v0.6.0.
+**Feature freeze is declared:** the feature set — graph build, insert, beam
+search, tombstone delete, and filtered traversal — is complete. Only the
+compaction optimisation above remains, and it is not a feature-surface change.
 
 ---
 
-## v0.5.0 -- recall vs flat on SIFT1M/GIST1M + hnswlib comparison + API freeze
+## v0.5.0 -- recall validation + API freeze (DONE)
 
 Exit criteria:
-- [ ] Public API frozen (recorded here). `cargo audit` + `cargo deny` clean.
+- [x] Public API frozen (recorded below). `cargo audit` + `cargo deny` clean.
+
+A headline recall@10 ≥ 0.95 gate across all five metrics (`tests/recall.rs`),
+measured against an inline exact full-scan oracle, validates the graph at scale;
+an `#[ignore]`'d SIFT-1M diagnostic (`tests/sift_recall.rs`) is available for
+real-data validation when the dataset is present. An hnswlib comparison is
+deferred to the alpha phase as an external benchmark (not an API gate).
+
+### Frozen public API (1.x compatibility surface)
+
+Recorded here at the API freeze. Everything below is committed; only **additive,
+non-breaking** changes are made through 1.x. `iqdb_types::IqdbError` is
+`#[non_exhaustive]`, so new variants are not breaking.
+
+- **`iqdb_hnsw::VERSION: &str`** — compile-time SemVer string.
+- **`iqdb_hnsw::Hit`** — re-export of `iqdb_types::Hit` (the search result type).
+- **`HnswConfig`** — fields `m`, `ef_construction`, `ef_search`, `filter_widen`,
+  `seed`; builder `with_*` overrides; `derive(Debug, Clone, Copy, PartialEq, Eq,
+  Default)`.
+- **`HnswIndex`** — `derive(Debug)`; `Send + Sync`. Inherent methods:
+  `new_unconfigured`, `dim`, `metric`, `len`, `is_empty`, `config`,
+  `node_layer_histogram`.
+- **`impl iqdb_index::Index for HnswIndex`** — `type Config = HnswConfig`; `new`.
+- **`impl iqdb_index::IndexCore for HnswIndex`** — `insert`, `insert_batch`*,
+  `delete`, `search`, `search_batch`*, `len`, `is_empty`, `dim`, `metric`,
+  `flush`, `stats` (* = trait default, not overridden).
+- **No feature flags.**
+
+Behavioural contracts frozen with the surface: `Hit.distance` is
+smaller-is-nearer for all five metrics (`DotProduct` negated); deterministic graph
+under a fixed seed + insert order; tombstone delete (a deleted id never reappears
+in `search` until re-inserted); no method panics on any input; zero `unsafe`.
 
 ---
 
-## v0.6.0 -> v0.9.x -- Alpha / Beta -> RC
+## v0.6.0 -- consolidated implementation release (alpha entry) (DONE)
 
-- 0.6.x-0.7.x: integrate against real consumers; MINOR-compatible additions only.
+The full implementation (roadmap v0.2–v0.5: graph, insert, beam search, neighbour
+heuristic, tombstone delete, filtered traversal, recall validation, API freeze)
+landed in a single consolidated release tagged **v0.6.0** — the crate goes from
+the v0.1.0 scaffold straight to 0.6.0 to align with the iQDB family's version line
+(`iqdb-flat` / `iqdb-build` are already at `0.5.0`+). This is the alpha entry point.
+
+---
+
+## v0.7.x -> v0.9.x -- Alpha / Beta -> RC
+
+- 0.7.x: integrate against real consumers (`iqdb`, `iqdb-build`); MINOR-compatible
+  additions only; hnswlib external comparison.
 - 0.8.x (beta): bug fixes; broader testing; final benchmarks.
 - 0.9.x (rc): critical fixes + doc polish.
 

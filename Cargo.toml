@@ -9,7 +9,7 @@
 #╚═══════════════════════════════╝
 [package]
 name    = "iqdb-hnsw"
-version = "0.1.0"
+version = "0.6.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.87"
@@ -46,7 +46,8 @@ documentation = "https://docs.rs/iqdb-hnsw"
 
 # Authors
 authors = [
-    "James Gober <me@jamesgober.com>"
+    "James Gober <me@jamesgober.com>",
+    "Matt Callahan <matthewcallahan01@icloud.com>"
 ]
 
 [package.metadata.docs.rs]
@@ -60,28 +61,33 @@ path = "src/lib.rs"
 
 # FEATURE FLAGS
 # #################################
+# No feature flags. HNSW construction is single-writer-internal (the engine
+# guards each index with an external lock), so there is no parallel toggle, and
+# persistence is the separate `iqdb-persist` crate's job. The default build is
+# the whole surface.
 [features]
-default = ["std"]
-# Standard library.
-std = []
-# Serialization support.
-serde = ["dep:serde"]
+default = []
 
 
 # DEPENDENCIES
 # #################################
 [dependencies]
-serde = { version = "1", optional = true, default-features = false, features = ["derive", "alloc"] }
+# Shared iQDB vocabulary: VectorId, Metadata, Hit, SearchParams, DistanceMetric, IqdbError.
+iqdb-types    = "1.0.0"
+# The five distance kernels (SIMD where the target allows it); HNSW delegates all
+# metric math to `compute_batch` and never reimplements a metric.
+iqdb-distance = "1.0.0"
+# The Index / IndexCore traits this crate implements.
+iqdb-index    = "1.0.0"
+# Metadata post-filter evaluation during traversal.
+iqdb-filter   = "1.0.0"
 
 
 # DEV DEPENDENCIES
 # #################################
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
-proptest = "1"
-
-[target.'cfg(loom)'.dev-dependencies]
-loom = "0.7"
+proptest  = "1"
 
 
 # BENCHMARKS
