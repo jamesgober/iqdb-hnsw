@@ -29,7 +29,7 @@
         <strong>MSRV is 1.87+</strong> (Rust 2024 edition). Production ANN. Recall-validated. Filtered traversal. Deterministic.
     </p>
     <blockquote>
-        <strong>Status: pre-1.0, API frozen.</strong> The graph, insert, beam search, tombstone delete, and filtered traversal are implemented, tested, and recall-validated, and the public API is committed as of <code>v0.6.0</code> (only additive, non-breaking changes through 1.x). See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
+        <strong>Status: stable (1.0).</strong> The graph, insert, beam search, tombstone delete, and filtered traversal are implemented, tested, and recall-validated against the exact <code>iqdb-flat</code> oracle. The public API is frozen for the 1.x series &mdash; only additive, non-breaking changes until 2.0. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
     </blockquote>
 </div>
 
@@ -51,7 +51,7 @@
 
 ```toml
 [dependencies]
-iqdb-hnsw = "0.6"
+iqdb-hnsw = "1.0"
 ```
 
 <br>
@@ -79,9 +79,60 @@ assert_eq!(hits[0].id, VectorId::U64(1)); // nearest to the origin
 
 <br>
 
+## Filtered search
+
+Attach an `iqdb-filter` predicate to the query. Only records whose metadata
+satisfies it are returned — evaluated during traversal, with the beam widened by
+`filter_widen` so a selective filter still fills `k`:
+
+```rust
+use std::sync::Arc;
+
+use iqdb_hnsw::{HnswConfig, HnswIndex};
+use iqdb_index::{Index, IndexCore};
+use iqdb_types::{DistanceMetric, Filter, Metadata, SearchParams, Value, VectorId};
+
+let mut idx = HnswIndex::new(2, DistanceMetric::Euclidean, HnswConfig::default())?;
+
+let red: Metadata = [("color".to_string(), Value::String("red".to_string()))]
+    .into_iter().collect();
+let blue: Metadata = [("color".to_string(), Value::String("blue".to_string()))]
+    .into_iter().collect();
+
+idx.insert(VectorId::from(1u64), Arc::<[f32]>::from(&[0.0, 0.0][..]), Some(red))?;
+idx.insert(VectorId::from(2u64), Arc::<[f32]>::from(&[0.1, 0.0][..]), Some(blue))?;
+
+let params = SearchParams {
+    filter: Some(Filter::eq("color", Value::String("red".to_string()))),
+    ..SearchParams::new(5, DistanceMetric::Euclidean)
+};
+let hits = idx.search(&[0.0, 0.0], &params)?;
+assert!(hits.iter().all(|h| h.id == VectorId::U64(1))); // id 2 is nearer, but blue
+```
+
+<br>
+
+## Tuning
+
+The defaults (`m = 16`, `ef_construction = 200`, `ef_search = 64`) are the
+SIFT-calibrated operating point. Override any field with the `with_*` builders;
+larger `m` / `ef_construction` raise recall and build cost, larger `ef_search`
+raises recall and per-query cost:
+
+```rust
+use iqdb_hnsw::HnswConfig;
+
+let cfg = HnswConfig::default()
+    .with_m(32)            // denser graph: higher recall, more memory
+    .with_ef_construction(400) // more thorough build
+    .with_ef_search(128);  // wider query beam: higher recall, slower search
+```
+
+<br>
+
 ## Status
 
-<code>v0.6.0</code> is **feature-complete with the public API frozen**: the multi-layer graph, insert with the Alg 4 neighbour heuristic, beam search, tombstone delete, and `iqdb-filter` traversal all ship, wired to the stable (`1.0`) iQDB spine. Correctness is pinned by a headline recall@10 ≥ 0.95 gate across all five metrics (against an exact full-scan oracle), plus determinism, contract, edge, layer-distribution, and tombstone suites. Zero `unsafe`. The committed surface is recorded in the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>; only additive, non-breaking changes are made through 1.x. Remaining work to 1.0 is real-data recall validation (SIFT/GIST), integration against the engine, and polish — see <a href="./docs/API.md"><code>docs/API.md</code></a>.
+<code>v1.0.0</code> is **stable**: the multi-layer graph, insert with the Alg 4 neighbour heuristic, beam search, tombstone delete, and `iqdb-filter` traversal all ship, wired to the stable (`1.0`) iQDB spine. Correctness is pinned by a headline recall@10 ≥ 0.95 gate across all five metrics, measured against the exact <a href="https://crates.io/crates/iqdb-flat"><code>iqdb-flat</code></a> ground truth, plus determinism, contract, edge, layer-distribution, and tombstone suites. Zero `unsafe` (`#![forbid(unsafe_code)]`). The public API is frozen until 2.0 — only additive, non-breaking changes from here. A real-data SIFT/GIST recall diagnostic (`tests/sift_recall.rs`) and a `criterion` latency/recall bench ship alongside. See the <a href="./docs/API.md"><code>API reference</code></a> and the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
 
 <hr>
 <br>

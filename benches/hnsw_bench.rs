@@ -2,9 +2,10 @@
 //! three `ef_search` widths, with recall@10 reported in each bench name so the
 //! latency / recall curve is documented on every run.
 //!
-//! Recall is measured against an inline exact full-scan oracle (the same
-//! `iqdb_distance` kernel HNSW uses, `DotProduct` negated), so the bench needs
-//! no sibling index crate. This is a documentation bench, not a regression gate.
+//! Recall is measured against the exact `iqdb_flat::FlatIndex` oracle — the
+//! same brute-force ground truth the headline recall gate uses — so the bench
+//! and the gate share one notion of "true top-k". This is a documentation
+//! bench, not a regression gate.
 //!
 //! Data is synthetic and seeded (sin/cos columns from the row index plus a
 //! dimension offset) so the recall numbers in the bench names are reproducible.
@@ -13,7 +14,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use iqdb_distance::compute_batch;
+use iqdb_flat::{FlatConfig, FlatIndex};
 use iqdb_hnsw::{HnswConfig, HnswIndex};
 use iqdb_index::{Index, IndexCore};
 use iqdb_types::{DistanceMetric, SearchParams, VectorId};
@@ -41,24 +42,19 @@ fn build_hnsw(n: usize, dim: usize, metric: DistanceMetric, ef_search: usize) ->
     idx
 }
 
-/// Exact top-`k` ids by full scan — the recall oracle.
-fn exact_top_ids(rows: &[Vec<f32>], query: &[f32], metric: DistanceMetric, k: usize) -> Vec<u64> {
-    let slices: Vec<&[f32]> = rows.iter().map(Vec::as_slice).collect();
-    let mut dists = vec![0.0_f32; slices.len()];
-    compute_batch(metric, query, &slices, &mut dists).expect("distance");
-    let negate = matches!(metric, DistanceMetric::DotProduct);
-    let mut scored: Vec<(u64, f32)> = dists
-        .iter()
-        .enumerate()
-        .map(|(i, &d)| (i as u64, if negate { -d } else { d }))
-        .collect();
-    scored.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
-    scored.truncate(k);
-    scored.into_iter().map(|(id, _)| id).collect()
+/// Build the exact `FlatIndex` oracle over the same corpus as the HNSW index.
+fn build_flat(n: usize, dim: usize, metric: DistanceMetric) -> FlatIndex {
+    let mut flat = FlatIndex::new(dim, metric, FlatConfig).expect("valid dim");
+    for i in 0..n {
+        let row = synthetic_row(i, dim);
+        flat.insert(VectorId::from(i as u64), arc(&row), None)
+            .expect("fresh id");
+    }
+    flat
 }
 
 fn recall_at_10(
-    rows: &[Vec<f32>],
+    flat: &FlatIndex,
     hnsw: &HnswIndex,
     dim: usize,
     metric: DistanceMetric,
@@ -68,8 +64,14 @@ fn recall_at_10(
     let mut total = 0.0_f64;
     for q in 0..n_queries {
         let query = query_vector(q.wrapping_mul(37), dim);
-        let exact: std::collections::HashSet<u64> = exact_top_ids(rows, &query, metric, 10)
-            .into_iter()
+        let exact: std::collections::HashSet<u64> = flat
+            .search(&query, &params)
+            .expect("flat search")
+            .iter()
+            .filter_map(|h| match h.id {
+                VectorId::U64(v) => Some(v),
+                _ => None,
+            })
             .collect();
         let hnsw_hits = hnsw.search(&query, &params).expect("hnsw search");
         let overlap = hnsw_hits
@@ -88,10 +90,10 @@ fn bench_hnsw(c: &mut Criterion) {
     let ef_search_values = [32_usize, 64, 128];
 
     for n in scales {
-        let rows: Vec<Vec<f32>> = (0..n).map(|i| synthetic_row(i, dim)).collect();
+        let flat = build_flat(n, dim, metric);
         for ef in ef_search_values {
             let hnsw = build_hnsw(n, dim, metric, ef);
-            let recall = recall_at_10(&rows, &hnsw, dim, metric, 64);
+            let recall = recall_at_10(&flat, &hnsw, dim, metric, 64);
             let recall_pct = (recall * 1000.0).round() as i64;
             let query = query_vector(0, dim);
             let params = SearchParams::new(10, metric);

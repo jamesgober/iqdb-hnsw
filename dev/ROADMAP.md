@@ -108,20 +108,27 @@ the v0.1.0 scaffold straight to 0.6.0 to align with the iQDB family's version li
 
 ---
 
-## v0.7.x -> v0.9.x -- Alpha / Beta -> RC
+## v0.7.x -> v0.9.x -- Alpha / Beta -> RC (CONSOLIDATED INTO v1.0.0)
 
-- 0.7.x: integrate against real consumers (`iqdb`, `iqdb-build`); MINOR-compatible
-  additions only; hnswlib external comparison.
-- 0.8.x (beta): bug fixes; broader testing; final benchmarks.
-- 0.9.x (rc): critical fixes + doc polish.
+The alpha/beta/RC band collapsed into the `1.0.0` release. With the whole
+dependency family published and stable at `1.0` — including the recall-oracle
+sibling `iqdb-flat` — the remaining alpha task that actually gated the surface
+(recall validation against `iqdb-flat`, not a hand-rolled oracle) was completed
+directly, and the feature set has been frozen and unchanged since `0.6.0`. The
+hnswlib external comparison stays an out-of-tree diagnostic (`tests/sift_recall.rs`
+with the published SIFT ground truth and an hnswlib reference line), never an API
+gate, so it does not block the stable tag.
 
 ---
 
-## v1.0.0 -- Stable
+## v1.0.0 -- Stable (DONE)
 
-- [ ] Definition of Done (DIRECTIVES section 7) satisfied.
-- [ ] Public API frozen until 2.0.
-- [ ] Release note written; published to crates.io; tag pushed.
+- [x] Definition of Done (DIRECTIVES section 7) satisfied.
+- [x] Public API frozen until 2.0 (unchanged from the `0.6.0` freeze).
+- [x] Recall validated against the published `iqdb-flat` ground truth
+      (DIRECTIVES §8); filtered-traversal path covered end to end.
+- [x] Release note written (`docs/release/v1.0.0.md`). Publish + tag are the
+      maintainer's step.
 
 ---
 

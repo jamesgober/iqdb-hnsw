@@ -1,53 +1,24 @@
-//! Headline recall test: `iqdb-hnsw` recall@10 vs an exact full-scan
+//! Headline recall test: `iqdb-hnsw` recall@10 vs the exact `iqdb-flat`
 //! oracle across every distance metric.
 //!
-//! The oracle is inlined here rather than pulled from `iqdb-flat`: it scores
-//! every row with the same `iqdb_distance` kernel HNSW uses (negating
-//! `DotProduct` at the boundary for the shared smaller-is-nearer contract) and
-//! takes the true top-`k`. That keeps recall measuring the *graph* — does HNSW
-//! find the genuine nearest neighbours by distance — without a dependency on a
-//! sibling index crate.
+//! The ground truth is [`iqdb_flat::FlatIndex`] — the family's brute-force
+//! exact index — built over the identical corpus. Recall therefore measures
+//! the *graph*: of the genuine nearest neighbours `FlatIndex` returns by full
+//! scan, what fraction does HNSW's beam search recover. Both indexes share the
+//! one ordering contract (`Hit.distance` smaller-is-nearer, `DotProduct`
+//! negated at the boundary) and the same insertion-order tie-break, so the
+//! comparison is apples-to-apples. Validating against the published sibling —
+//! not a hand-rolled scan — is the DIRECTIVES §8 mandate.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)]
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use iqdb_distance::compute_batch;
+use iqdb_flat::{FlatConfig, FlatIndex};
 use iqdb_hnsw::{HnswConfig, HnswIndex};
 use iqdb_index::{Index, IndexCore};
-use iqdb_types::{DistanceMetric, Hit, SearchParams, VectorId};
-
-/// An exact brute-force top-`k` oracle: full scan, same distance kernel and
-/// ordering contract as the indexes under test.
-struct ExactOracle {
-    metric: DistanceMetric,
-    rows: Vec<Arc<[f32]>>,
-}
-
-impl ExactOracle {
-    fn search(&self, query: &[f32], params: &SearchParams) -> iqdb_types::Result<Vec<Hit>> {
-        let slices: Vec<&[f32]> = self.rows.iter().map(AsRef::as_ref).collect();
-        let mut dists = vec![0.0_f32; slices.len()];
-        compute_batch(self.metric, query, &slices, &mut dists)?;
-        let negate = matches!(self.metric, DistanceMetric::DotProduct);
-        let mut scored: Vec<(u64, f32)> = dists
-            .iter()
-            .enumerate()
-            .map(|(i, &d)| (i as u64, if negate { -d } else { d }))
-            .collect();
-        scored.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
-        scored.truncate(params.k);
-        Ok(scored
-            .into_iter()
-            .map(|(id, distance)| Hit {
-                id: VectorId::from(id),
-                distance,
-                metadata: None,
-            })
-            .collect())
-    }
-}
+use iqdb_types::{DistanceMetric, SearchParams, VectorId};
 
 const N: usize = 5_000;
 const DIM: usize = 128;
@@ -58,8 +29,7 @@ const RECALL_FLOOR: f64 = 0.95;
 /// Explicit beam width used by the headline recall gate, decoupled from
 /// `HnswConfig::default().ef_search`. The gate's corpus is uniform-random
 /// — HNSW's worst case — and recall@10 on uniform-random only clears 0.95
-/// at ef >= 128 in this v0.1 (see `.dev/ROADMAP.md`, "Beam-search
-/// efficiency"). The production default is calibrated to real-data
+/// at ef >= 128. The production default is calibrated to real-data
 /// (SIFT-1M, recall@10 = 0.9644 at ef=64); the gate keeps a real 0.95
 /// floor by pinning the ef rather than inheriting it from the default.
 const GATE_EF_SEARCH: usize = 128;
@@ -122,11 +92,13 @@ fn make_row(rng: &mut Rng, dim: usize, metric: DistanceMetric) -> Vec<f32> {
     }
 }
 
-fn build_flat(metric: DistanceMetric, rows: &[Vec<f32>]) -> ExactOracle {
-    ExactOracle {
-        metric,
-        rows: rows.iter().map(|r| arc(r.clone())).collect(),
+fn build_flat(metric: DistanceMetric, rows: &[Vec<f32>]) -> FlatIndex {
+    let mut flat = FlatIndex::new(DIM, metric, FlatConfig).unwrap();
+    for (i, row) in rows.iter().enumerate() {
+        flat.insert(VectorId::from(i as u64), arc(row.clone()), None)
+            .unwrap();
     }
+    flat
 }
 
 fn build_hnsw(metric: DistanceMetric, rows: &[Vec<f32>]) -> HnswIndex {
@@ -185,7 +157,7 @@ fn make_clustered_rows(metric: DistanceMetric, n: usize, dim: usize, seed: u64) 
 /// Recall@K against the flat oracle using `search_with_ef` (one graph build,
 /// multiple ef values).
 fn compute_recall_at_ef(
-    flat: &ExactOracle,
+    flat: &FlatIndex,
     hnsw: &HnswIndex,
     queries: &[Vec<f32>],
     metric: DistanceMetric,

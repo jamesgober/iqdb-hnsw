@@ -1,13 +1,13 @@
 # iqdb-hnsw &mdash; API Reference
 
-> Complete reference for **every** public item in `iqdb-hnsw` as of **v0.6.0**:
+> Complete reference for **every** public item in `iqdb-hnsw` as of **v1.0.0**:
 > what it is, its parameters and return shape, the contract it carries, and
 > worked examples for each use case.
 >
-> **Status: pre-1.0, API frozen.** The surface below is implemented, tested, and
-> recall-validated, and is committed as of v0.6.0 (recorded in
-> [`dev/ROADMAP.md`](../dev/ROADMAP.md)); only additive, non-breaking changes are
-> made through the 1.x series.
+> **Status: stable (1.0).** The surface below is implemented, tested, and
+> recall-validated against the exact `iqdb-flat` ground truth, and is frozen for
+> the 1.x series (recorded in [`dev/ROADMAP.md`](../dev/ROADMAP.md)); only
+> additive, non-breaking changes are made until 2.0.
 
 ## Table of Contents
 
@@ -59,8 +59,9 @@ assert_eq!(hits[1].id, VectorId::U64(3));
 # Ok(()) }
 ```
 
-At the default `ef_search = 64`, recall@10 against an exact oracle clears `0.95`
-on real data (SIFT-1M, dim=128: recall@10 = 0.9644).
+At the default `ef_search = 64`, recall@10 against the exact
+[`iqdb_flat::FlatIndex`](https://docs.rs/iqdb-flat) ground truth clears `0.95` on
+real data (SIFT-1M, dim=128: recall@10 = 0.9644).
 
 ---
 
@@ -68,7 +69,7 @@ on real data (SIFT-1M, dim=128: recall@10 = 0.9644).
 
 ```toml
 [dependencies]
-iqdb-hnsw = "0.6"
+iqdb-hnsw = "1.0"
 ```
 
 There are no feature flags. HNSW construction is single-writer-internal (the
@@ -282,6 +283,42 @@ filtering is **post-filter**: the beam is widened by
 selective filter can still return fewer than `params.k` hits. A malformed filter,
 or one exceeding the `iqdb-filter` depth / `IN`-value caps, returns
 [`InvalidFilter`](https://docs.rs/iqdb-types/latest/iqdb_types/enum.IqdbError.html#variant.InvalidFilter).
+
+Set the public `SearchParams::filter` field to a [`Filter`](https://docs.rs/iqdb-types)
+predicate. Only hits whose stored [`Metadata`](https://docs.rs/iqdb-types) satisfies
+it are returned:
+
+```rust
+use std::sync::Arc;
+use iqdb_hnsw::{HnswConfig, HnswIndex};
+use iqdb_index::{Index, IndexCore};
+use iqdb_types::{DistanceMetric, Filter, Metadata, SearchParams, Value, VectorId};
+
+# fn main() -> iqdb_types::Result<()> {
+let mut idx = HnswIndex::new(2, DistanceMetric::Euclidean, HnswConfig::default())?;
+
+let red: Metadata = [("color".to_string(), Value::String("red".to_string()))]
+    .into_iter()
+    .collect();
+let blue: Metadata = [("color".to_string(), Value::String("blue".to_string()))]
+    .into_iter()
+    .collect();
+
+idx.insert(VectorId::from(1u64), Arc::<[f32]>::from(&[0.0, 0.0][..]), Some(red))?;
+idx.insert(VectorId::from(2u64), Arc::<[f32]>::from(&[0.1, 0.0][..]), Some(blue))?;
+
+// Nearest "red" vector, even though id 2 is closer overall.
+let params = SearchParams {
+    filter: Some(Filter::eq("color", Value::String("red".to_string()))),
+    ..SearchParams::new(5, DistanceMetric::Euclidean)
+};
+let hits = idx.search(&[0.0, 0.0], &params)?;
+assert!(hits.iter().all(|h| h.id == VectorId::U64(1)));
+# Ok(()) }
+```
+
+For a tighter filter, raise [`HnswConfig::filter_widen`] (or `ef_search`) so the
+widened beam keeps enough survivors to fill `params.k`.
 
 ---
 

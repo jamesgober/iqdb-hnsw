@@ -9,7 +9,7 @@
 #╚═══════════════════════════════╝
 [package]
 name    = "iqdb-hnsw"
-version = "0.6.0"
+version = "1.0.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.87"
@@ -86,6 +86,10 @@ iqdb-filter   = "1.0.0"
 # DEV DEPENDENCIES
 # #################################
 [dev-dependencies]
+# The exact brute-force sibling index. It is the recall ground truth: the
+# headline recall gate and the documentation bench score HNSW against
+# `FlatIndex`'s true top-k, never a hand-rolled oracle (DIRECTIVES §8).
+iqdb-flat = "1.0.0"
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest  = "1"
 

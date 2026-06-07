@@ -112,7 +112,7 @@ pub(crate) fn insert_node(
             .filter(|s| !idx.tombstoned[s.node as usize] && s.node != new_node)
             .collect();
         let m_cap = cap_at_layer(idx.cfg.m, lc);
-        let chosen = select_heuristic(idx, &vector, &live_candidates, m_cap)?;
+        let chosen = select_heuristic(idx, &live_candidates, m_cap)?;
 
         // Bidirectional links. When `s`'s neighbourhood overflows
         // the layer cap, re-trim it but pin `new_node` so the link
@@ -147,19 +147,6 @@ pub(crate) fn insert_node(
     Ok(())
 }
 
-/// Diagnostic-only simple top-M selection (Alg 3). Not currently
-/// used; kept available for A/B experiments against the heuristic.
-#[allow(dead_code)]
-fn select_simple(_idx: &HnswIndex, candidates: &[Scored], m_max: usize) -> Vec<Scored> {
-    if m_max == 0 || candidates.is_empty() {
-        return Vec::new();
-    }
-    let mut sorted: Vec<Scored> = candidates.to_vec();
-    sorted.sort();
-    sorted.truncate(m_max);
-    sorted
-}
-
 /// HNSW heuristic neighbour selection (Alg 4) with the standard
 /// `keepPrunedConnections = true` top-up.
 ///
@@ -178,11 +165,9 @@ fn select_simple(_idx: &HnswIndex, candidates: &[Scored], m_max: usize) -> Vec<S
 /// sparse.
 pub(crate) fn select_heuristic(
     idx: &HnswIndex,
-    query: &[f32],
     candidates: &[Scored],
     m_max: usize,
 ) -> Result<Vec<Scored>> {
-    let _ = query;
     if m_max == 0 || candidates.is_empty() {
         return Ok(Vec::new());
     }
@@ -248,8 +233,7 @@ fn trim_neighbourhood(
             node: nb,
         });
     }
-    let node_vec = Arc::clone(&idx.vectors[node as usize]);
-    let mut chosen = select_heuristic(idx, &node_vec, &candidates, cap)?;
+    let mut chosen = select_heuristic(idx, &candidates, cap)?;
 
     if let Some(pin) = pinned {
         let already_in = chosen.iter().any(|s| s.node == pin);

@@ -18,6 +18,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [1.0.0] - 2026-06-07
+
+**Stable.** The HNSW index graduates to `1.0` and joins the iQDB family's stable
+line alongside `iqdb-types`, `iqdb-distance`, `iqdb-index`, `iqdb-filter`,
+`iqdb-flat`, and `iqdb-build`. The public surface frozen in `0.6.0` is unchanged
+and is now committed until `2.0`; this release closes the last validation gap and
+polishes the internals. No breaking changes from `0.6.0`.
+
+### Changed
+
+- **Recall is now validated against the published `iqdb-flat` ground truth.** The
+  headline recall gate (`tests/recall.rs`) and the documentation bench
+  (`benches/hnsw_bench.rs`) score HNSW against `iqdb_flat::FlatIndex`'s exact
+  top-`k` instead of a hand-rolled full-scan oracle. `iqdb-flat 1.0` is now
+  published, so the sibling index can be a dev-dependency — fulfilling the
+  DIRECTIVES §8 mandate that recall be measured against `iqdb-flat`. The 0.95
+  recall@10 floor across all five metrics is unchanged and still met.
+- Promoted the project status from "pre-1.0, API frozen" to **stable**; updated
+  the README, `docs/API.md`, and the ROADMAP accordingly.
+
+### Added
+
+- **Filtered-search test suite** (`tests/filter.rs`) — end-to-end coverage of the
+  `SearchParams::filter` traversal path: matching-only results, empty result on a
+  non-matching predicate, exclusion of records without metadata, and tombstone
+  interaction. Closes a coverage gap on a frozen feature.
+- A worked filtered-search example in `docs/API.md`.
+
+### Removed
+
+- The unused `select_simple` neighbour-selection helper (a dead diagnostic kept
+  for A/B experiments) and the unused `query` parameter on the internal
+  `select_heuristic` — both private, no API impact.
+
+---
+
 ## [0.6.0] - 2026-06-06
 
 The HNSW index is **feature-complete, recall-validated, and API-frozen**. This
@@ -89,6 +125,7 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `REPS.md` compliance baseline.
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
-[Unreleased]: https://github.com/jamesgober/iqdb-hnsw/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/jamesgober/iqdb-hnsw/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/jamesgober/iqdb-hnsw/compare/v0.6.0...v1.0.0
 [0.6.0]: https://github.com/jamesgober/iqdb-hnsw/compare/v0.1.0...v0.6.0
 [0.1.0]: https://github.com/jamesgober/iqdb-hnsw/releases/tag/v0.1.0

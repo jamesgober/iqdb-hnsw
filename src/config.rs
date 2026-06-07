@@ -19,13 +19,12 @@ const DEFAULT_EF_CONSTRUCTION: usize = 200;
 /// Default beam width during search (Alg 5 `ef_search`).
 ///
 /// The production default is calibrated to real-data recall, not the
-/// synthetic worst case: on SIFT-1M (dim=128) this v0.1 measures
+/// synthetic worst case: on SIFT-1M (dim=128) `iqdb-hnsw` measures
 /// recall@10 = 0.9644 at `ef_search = 64`, clearing the 0.95 floor at
 /// roughly half the search cost of `ef_search = 128`. The headline
-/// uniform-random CI gate (`tests/recall.rs`) is HNSW's worst case and
-/// is exercised at an explicit `ef_search = 128`, decoupled from this
-/// default; closing the beam-efficiency gap vs reference HNSW on
-/// uniform-random data is tracked in `.dev/ROADMAP.md`.
+/// uniform-random recall gate (`tests/recall.rs`) is HNSW's worst case
+/// and is exercised at an explicit `ef_search = 128`, decoupled from
+/// this default.
 const DEFAULT_EF_SEARCH: usize = 64;
 
 /// Default multiplier applied to `ef_search` when a metadata filter
@@ -73,13 +72,12 @@ pub struct HnswConfig {
     /// Larger values raise recall at higher per-query cost. At
     /// query time the effective beam width is `max(ef_search, k)`.
     /// Default `64` — calibrated to real-data recall: on SIFT-1M
-    /// (dim=128) this v0.1 measures recall@10 = 0.9644 at
+    /// (dim=128) `iqdb-hnsw` measures recall@10 = 0.9644 at
     /// `ef_search = 64`, clearing the 0.95 floor at roughly half the
     /// search cost of `ef_search = 128`. The headline uniform-random
-    /// CI gate (`tests/recall.rs`) is HNSW's worst case and is
+    /// recall gate (`tests/recall.rs`) is HNSW's worst case and is
     /// exercised at an explicit `ef_search = 128`, decoupled from
-    /// this default; closing the beam-efficiency gap vs reference
-    /// HNSW on uniform-random data is tracked in `.dev/ROADMAP.md`.
+    /// this default.
     pub ef_search: usize,
     /// Multiplier applied to the effective beam width when a filter
     /// is supplied at query time.
