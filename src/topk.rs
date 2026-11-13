@@ -9,9 +9,10 @@
 //!
 //! `f32` ordering goes through [`f32::total_cmp`]; `partial_cmp`
 //! returns `None` on NaN, which would panic any `BinaryHeap`
-//! operation that round-trips through `Ord`. `total_cmp` defines
-//! a total order on every f32 payload a distance computation
-//! might produce.
+//! operation that round-trips through `Ord`. On top of `total_cmp`,
+//! every NaN ranks as the worst possible distance: `total_cmp` alone
+//! puts a NaN with its sign bit set (the default NaN x86 arithmetic
+//! produces) below every number, which would make it the best match.
 
 use core::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -31,9 +32,18 @@ pub(crate) struct Scored {
 
 impl Scored {
     fn cmp_key(&self, other: &Self) -> Ordering {
-        self.dist
-            .total_cmp(&other.dist)
-            .then(self.seq.cmp(&other.seq))
+        cmp_distance(self.dist, other.dist).then(self.seq.cmp(&other.seq))
+    }
+}
+
+/// Total order on distances with every NaN, whatever its sign bit,
+/// after every number including `+inf`.
+pub(crate) fn cmp_distance(a: f32, b: f32) -> Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (false, false) => a.total_cmp(&b),
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
     }
 }
 
@@ -132,5 +142,18 @@ mod tests {
         assert_eq!(top[0].node, 1);
         assert_eq!(top[1].node, 2);
         assert!(top[2].dist.is_nan());
+    }
+
+    #[test]
+    fn negative_nan_ranks_last_not_first() {
+        let neg_nan = f32::from_bits(0xffc0_0000);
+        assert!(neg_nan.is_nan() && neg_nan.is_sign_negative());
+        let mut heap = BinaryHeap::new();
+        heap.push(s(neg_nan, 0, 0));
+        heap.push(s(f32::INFINITY, 1, 1));
+        heap.push(s(1.0, 2, 2));
+        let top = take_topk_sorted(heap, 3);
+        let nodes: Vec<u32> = top.iter().map(|x| x.node).collect();
+        assert_eq!(nodes, vec![2, 1, 0]);
     }
 }

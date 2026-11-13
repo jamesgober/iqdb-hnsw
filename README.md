@@ -40,9 +40,9 @@
 
 - **HNSW graph** &mdash; hierarchical navigable small-world graph per Malkov & Yashunin (2016), built incrementally at insert time
 - **Standard knobs** &mdash; `m`, `ef_construction`, `ef_search`, `filter_widen`, and a fixed `seed` for reproducibility
-- **Insert / search / delete** &mdash; beam-search top-`k`; tombstone deletion (graph-repair compaction is a tracked post-freeze optimisation)
+- **Insert / search / delete** &mdash; beam-search top-`k`; tombstone deletion that never crowds out live results, and `compact()` to rebuild the graph without deleted nodes
 - **Deterministic** &mdash; a seeded SplitMix64 (no `rand` dep); same insert order + seed ⇒ byte-identical graph and identical results
-- **Filtered traversal** &mdash; metadata filtering via `iqdb-filter`, with the beam widened by `filter_widen` to mitigate post-filter under-return
+- **Filtered traversal** &mdash; metadata filtering via `iqdb-filter`, applied while walking the graph so a selective filter still fills `k` from the matches it can reach
 - **One ordering invariant** &mdash; all metric math via `iqdb-distance`; `DotProduct` negated so `Hit.distance` is smaller-is-nearer across all five metrics
 
 <br>
@@ -132,7 +132,7 @@ let cfg = HnswConfig::default()
 
 ## Status
 
-<code>v1.0.0</code> is **stable**: the multi-layer graph, insert with the Alg 4 neighbour heuristic, beam search, tombstone delete, and `iqdb-filter` traversal all ship, wired to the stable (`1.0`) iQDB spine. Correctness is pinned by a headline recall@10 ≥ 0.95 gate across all five metrics, measured against the exact <a href="https://crates.io/crates/iqdb-flat"><code>iqdb-flat</code></a> ground truth, plus determinism, contract, edge, layer-distribution, and tombstone suites. Zero `unsafe` (`#![forbid(unsafe_code)]`). The public API is frozen until 2.0 — only additive, non-breaking changes from here. A real-data SIFT/GIST recall diagnostic (`tests/sift_recall.rs`) and a `criterion` latency/recall bench ship alongside. See the <a href="./docs/API.md"><code>API reference</code></a> and the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+<code>v1.1.0</code> is **stable**: the multi-layer graph, insert with the Alg 4 neighbour heuristic, beam search, tombstone delete with `compact()`, and `iqdb-filter` traversal all ship, wired to the stable (`1.0`) iQDB spine. Correctness is pinned by a headline recall@10 ≥ 0.95 gate across all five metrics, measured against the exact <a href="https://crates.io/crates/iqdb-flat"><code>iqdb-flat</code></a> ground truth, plus determinism, contract, edge, layer-distribution, and tombstone suites. Zero `unsafe` (`#![forbid(unsafe_code)]`). The public API is frozen until 2.0 — only additive, non-breaking changes from here. A real-data SIFT/GIST recall diagnostic (`tests/sift_recall.rs`) and a `criterion` latency/recall bench ship alongside. See the <a href="./docs/API.md"><code>API reference</code></a> and the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
 
 <hr>
 <br>

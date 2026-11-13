@@ -26,7 +26,7 @@ pub(crate) type NodeIdx = u32;
 /// neighbour that grows beyond this after a bidirectional link.
 #[inline]
 pub(crate) const fn cap_at_layer(m: usize, layer: u8) -> usize {
-    if layer == 0 { 2 * m } else { m }
+    if layer == 0 { m.saturating_mul(2) } else { m }
 }
 
 /// Pick the top layer for a freshly-inserted node.

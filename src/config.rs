@@ -60,7 +60,8 @@ pub struct HnswConfig {
     /// Max neighbours per node above layer 0; layer 0 uses `2 * m`.
     ///
     /// Larger `m` raises recall, build cost, and memory; smaller `m`
-    /// is faster to build but recall degrades. Default `16`.
+    /// is faster to build but recall degrades. Must be in `1..=1024`.
+    /// Default `16`.
     pub m: usize,
     /// Beam width during insert (Alg 1 `ef_construction`).
     ///
@@ -70,7 +71,8 @@ pub struct HnswConfig {
     /// Beam width during search (Alg 5 `ef_search`).
     ///
     /// Larger values raise recall at higher per-query cost. At
-    /// query time the effective beam width is `max(ef_search, k)`.
+    /// query time the effective beam width is `max(ef_search, k)`, or
+    /// `max(SearchParams::ef, k)` when the query sets `ef`.
     /// Default `64` — calibrated to real-data recall: on SIFT-1M
     /// (dim=128) `iqdb-hnsw` measures recall@10 = 0.9644 at
     /// `ef_search = 64`, clearing the 0.95 floor at roughly half the
@@ -82,9 +84,9 @@ pub struct HnswConfig {
     /// Multiplier applied to the effective beam width when a filter
     /// is supplied at query time.
     ///
-    /// Mitigates HNSW post-filter under-return: a selective filter
-    /// can leave fewer than `k` survivors in a narrow beam. Default
-    /// `4`.
+    /// Nodes that fail the filter are walked through but not
+    /// collected, so a wider beam finds more matching nodes near the
+    /// query before the walk stops. Default `4`.
     pub filter_widen: usize,
     /// Seed for the internal SplitMix64 PRNG that assigns each new
     /// node's top layer.

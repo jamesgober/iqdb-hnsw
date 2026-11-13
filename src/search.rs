@@ -7,16 +7,30 @@
 //! through the upper layers with `ef = 1`, then run SEARCH-LAYER at
 //! layer 0 with `ef = max(ef_search, k)` and take the closest `k`.
 //!
-//! ## Tombstone behaviour
+//! ## Tombstone and filter behaviour
 //!
-//! Tombstoned nodes are **traversed** for graph connectivity — their
-//! out-edges still lead to live nodes — but they participate in the
-//! result heap too so the beam shape stays uniform. The public
-//! `search` entry point filters tombstoned nodes at the
-//! `Hit`-construction step; the insert path's heuristic filters them
-//! too before they can become a freshly-linked neighbour.
+//! Deleted (tombstoned) nodes are **traversed** for graph connectivity,
+//! since their out-edges still lead to live nodes, but at layer 0 of a
+//! query they never enter the result beam and never count toward it. A
+//! metadata filter works the same way: a node that fails it is walked
+//! through but not collected. The beam therefore holds up to `ef` nodes
+//! that can actually be returned, and the walk only stops early once it
+//! has that many, so a neighbourhood full of deleted or filtered-out
+//! nodes widens the search instead of starving it. When fewer than `k`
+//! such nodes are reachable, the walk covers the whole reachable graph
+//! and returns what it found.
+//!
+//! The insert path keeps tombstoned nodes in its candidate beam (they
+//! are still useful routing points) and filters them out before they
+//! can become a freshly linked neighbour.
+//!
+//! ## Size bounds
+//!
+//! Every buffer is sized from the beam width clamped to the number of
+//! stored nodes, never from the caller's `k` or `ef` alone, so a huge
+//! `k` costs no more than an exhaustive walk.
 
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashSet};
 
 use iqdb_distance::compute_batch;
@@ -25,55 +39,15 @@ use iqdb_types::{DistanceMetric, Hit, IqdbError, Result, SearchParams};
 
 use crate::graph::NodeIdx;
 use crate::index::HnswIndex;
-use crate::topk::{Scored, take_topk_sorted};
+use crate::topk::{Scored, cmp_distance, take_topk_sorted};
 
 /// Public-facing search entry point. Called from
 /// [`crate::HnswIndex::search`] (via the trait-impl shim in
-/// `index.rs`).
+/// `index.rs`). The base beam width is `params.ef` when set, else the
+/// configured `ef_search`.
 pub(crate) fn search(idx: &HnswIndex, query: &[f32], params: &SearchParams) -> Result<Vec<Hit>> {
-    idx.check_dim(query.len())?;
-    if params.metric != idx.metric {
-        return Err(IqdbError::InvalidMetric);
-    }
-    if params.k == 0 || idx.live_count == 0 || idx.entry.is_none() {
-        return Ok(Vec::new());
-    }
-
-    let ef_base = idx.cfg.ef_search.max(params.k);
-    let ef_effective = if params.filter.is_some() {
-        ef_base.saturating_mul(idx.cfg.filter_widen)
-    } else {
-        ef_base
-    };
-
-    let scored = knn_search(idx, query, ef_effective)?;
-
-    match &params.filter {
-        None => Ok(scored
-            .into_iter()
-            .filter(|s| !idx.tombstoned[s.node as usize])
-            .take(params.k)
-            .map(|s| Hit {
-                id: idx.ids[s.node as usize].clone(),
-                distance: s.dist,
-                metadata: idx.metadata[s.node as usize].clone(),
-            })
-            .collect()),
-        Some(filter) => {
-            let evaluator = FilterEvaluator::new(filter.clone())?;
-            Ok(scored
-                .into_iter()
-                .filter(|s| !idx.tombstoned[s.node as usize])
-                .filter(|s| evaluator.evaluate(idx.metadata[s.node as usize].as_ref()))
-                .take(params.k)
-                .map(|s| Hit {
-                    id: idx.ids[s.node as usize].clone(),
-                    distance: s.dist,
-                    metadata: idx.metadata[s.node as usize].clone(),
-                })
-                .collect())
-        }
-    }
+    let ef = params.ef.unwrap_or(idx.cfg.ef_search);
+    search_impl(idx, query, params, ef)
 }
 
 /// Like [`search`] but overrides the stored `ef_search` with a
@@ -83,6 +57,15 @@ pub(crate) fn search(idx: &HnswIndex, query: &[f32], params: &SearchParams) -> R
 /// `filter_widen` when a filter is present (same as [`search`]) but
 /// uses `ef` instead of `idx.cfg.ef_search` as the base beam width.
 pub(crate) fn search_with_ef(
+    idx: &HnswIndex,
+    query: &[f32],
+    params: &SearchParams,
+    ef: usize,
+) -> Result<Vec<Hit>> {
+    search_impl(idx, query, params, ef)
+}
+
+fn search_impl(
     idx: &HnswIndex,
     query: &[f32],
     params: &SearchParams,
@@ -102,41 +85,50 @@ pub(crate) fn search_with_ef(
     } else {
         ef_base
     };
+    // The result beam only ever holds live nodes, so a width past the
+    // live count buys nothing; clamping here keeps a huge `k` from
+    // sizing anything.
+    let ef_effective = ef_effective.min(idx.live_count);
 
-    let scored = knn_search(idx, query, ef_effective)?;
-
-    match &params.filter {
-        None => Ok(scored
-            .into_iter()
-            .filter(|s| !idx.tombstoned[s.node as usize])
-            .take(params.k)
-            .map(|s| Hit {
-                id: idx.ids[s.node as usize].clone(),
-                distance: s.dist,
-                metadata: idx.metadata[s.node as usize].clone(),
-            })
-            .collect()),
+    let scored = match &params.filter {
+        None => {
+            let accept = |n: NodeIdx| !idx.tombstoned[n as usize];
+            knn_search(idx, query, ef_effective, Some(&accept))?
+        }
         Some(filter) => {
             let evaluator = FilterEvaluator::new(filter.clone())?;
-            Ok(scored
-                .into_iter()
-                .filter(|s| !idx.tombstoned[s.node as usize])
-                .filter(|s| evaluator.evaluate(idx.metadata[s.node as usize].as_ref()))
-                .take(params.k)
-                .map(|s| Hit {
-                    id: idx.ids[s.node as usize].clone(),
-                    distance: s.dist,
-                    metadata: idx.metadata[s.node as usize].clone(),
-                })
-                .collect())
+            let accept = |n: NodeIdx| {
+                !idx.tombstoned[n as usize] && evaluator.evaluate(idx.metadata[n as usize].as_ref())
+            };
+            knn_search(idx, query, ef_effective, Some(&accept))?
         }
-    }
+    };
+
+    Ok(scored
+        .into_iter()
+        .take(params.k)
+        .map(|s| Hit {
+            id: idx.ids[s.node as usize].clone(),
+            distance: s.dist,
+            metadata: idx.metadata[s.node as usize].clone(),
+        })
+        .collect())
 }
+
+/// Which nodes may enter a SEARCH-LAYER result beam. `None` admits
+/// every node.
+pub(crate) type Accept<'a> = Option<&'a dyn Fn(NodeIdx) -> bool>;
 
 /// HNSW k-NN search (Alg 5): greedy-descend through the upper layers
 /// at `ef = 1`, then SEARCH-LAYER at layer 0 with the supplied `ef`.
-/// Returns up to `ef` Scored entries in ascending-distance order.
-pub(crate) fn knn_search(idx: &HnswIndex, query: &[f32], ef: usize) -> Result<Vec<Scored>> {
+/// Returns up to `ef` Scored entries in ascending-distance order, all
+/// admitted by `accept`.
+pub(crate) fn knn_search(
+    idx: &HnswIndex,
+    query: &[f32],
+    ef: usize,
+    accept: Accept<'_>,
+) -> Result<Vec<Scored>> {
     let entry = match idx.entry {
         Some(e) => e,
         None => return Ok(Vec::new()),
@@ -148,35 +140,45 @@ pub(crate) fn knn_search(idx: &HnswIndex, query: &[f32], ef: usize) -> Result<Ve
         node: entry,
     };
 
-    // Greedy descent through layers `top_layer..=1` with ef=1.
+    // Greedy descent through layers `top_layer..=1` with ef=1. This is
+    // routing only, so every node, deleted or not, is a valid step.
     let mut layer = idx.top_layer;
     while layer >= 1 {
-        let result_heap = search_layer(idx, query, &[cur], layer, 1)?;
+        let result_heap = search_layer(idx, query, &[cur], layer, 1, None)?;
         if let Some(nearest) = best_of(&result_heap) {
             cur = nearest;
         }
         layer -= 1;
     }
 
-    let result_heap = search_layer(idx, query, &[cur], 0, ef)?;
+    let result_heap = search_layer(idx, query, &[cur], 0, ef, accept)?;
     Ok(take_topk_sorted(result_heap, ef))
 }
 
 /// HNSW SEARCH-LAYER (Alg 2): beam search at one layer.
 ///
-/// `entries` seeds both the candidate min-heap and the result
-/// max-heap (every entry is "visited"). The loop pops the nearest
-/// unexpanded candidate, batches the distance computation to its
-/// unvisited neighbours through [`iqdb_distance::compute_batch`],
-/// and prunes against the result heap's worst-best entry.
+/// `entries` seed the candidate min-heap (every entry is "visited"),
+/// and those admitted by `accept` also seed the result max-heap. The
+/// loop pops the nearest unexpanded candidate, batches the distance
+/// computation to its unvisited neighbours through
+/// [`iqdb_distance::compute_batch`], and prunes against the result
+/// heap's worst-best entry. Nodes `accept` rejects are still expanded
+/// (they keep the graph connected) but never enter the result heap,
+/// so the stop check only fires once `ef` admitted nodes are held.
 pub(crate) fn search_layer(
     idx: &HnswIndex,
     query: &[f32],
     entries: &[Scored],
     layer: u8,
     ef: usize,
+    accept: Accept<'_>,
 ) -> Result<BinaryHeap<Scored>> {
-    let mut visited: HashSet<NodeIdx> = HashSet::with_capacity(ef.saturating_mul(2));
+    // A result heap can never hold more than every stored node, so the
+    // node count bounds every buffer whatever `ef` the caller asked for.
+    let n_nodes = idx.vectors.len().max(1);
+    let ef = ef.clamp(1, n_nodes);
+    let admits = |n: NodeIdx| accept.is_none_or(|f| f(n));
+    let mut visited: HashSet<NodeIdx> = HashSet::with_capacity(ef.saturating_mul(2).min(n_nodes));
     let mut candidates: BinaryHeap<Reverse<Scored>> = BinaryHeap::with_capacity(ef);
     let mut results: BinaryHeap<Scored> = BinaryHeap::with_capacity(ef);
 
@@ -185,7 +187,9 @@ pub(crate) fn search_layer(
             continue;
         }
         candidates.push(Reverse(*e));
-        push_to_results(&mut results, *e, ef);
+        if admits(e.node) {
+            push_to_results(&mut results, *e, ef);
+        }
     }
 
     // Peek the nearest unexpanded candidate first. If it is already
@@ -196,7 +200,7 @@ pub(crate) fn search_layer(
     while let Some(Reverse(next)) = candidates.peek().copied() {
         if results.len() >= ef {
             if let Some(worst) = results.peek() {
-                if next.dist > worst.dist {
+                if cmp_distance(next.dist, worst.dist) == Ordering::Greater {
                     break;
                 }
             }
@@ -257,7 +261,9 @@ pub(crate) fn search_layer(
             };
             if competitive {
                 candidates.push(Reverse(scored));
-                push_to_results(&mut results, scored, ef);
+                if admits(n) {
+                    push_to_results(&mut results, scored, ef);
+                }
             }
         }
     }

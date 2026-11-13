@@ -8,13 +8,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+Planned as 1.1.0.
+
 ### Added
 
-### Changed
+- `HnswIndex::compact()` rebuilds the graph from the live vectors and frees
+  every deleted node. Each vector keeps its insertion order and layer, so
+  results stay deterministic. Deleted nodes used to stay in memory until the
+  index was dropped.
+- `HnswIndex::tombstones()` reports how many deleted nodes the graph still
+  holds, so callers can decide when to compact.
 
 ### Fixed
 
+- Searches could return no results while live vectors remained. Deleted
+  nodes filled the result beam and were only dropped afterwards, so after
+  deleting the neighbourhood of a query (3,000 of 4,000 vectors in one test)
+  a search for 10 returned nothing. Deleted nodes are still walked through,
+  since they keep the graph connected, but they no longer enter the beam or
+  count toward it, so the walk keeps going until it holds `ef` live nodes or
+  has covered the reachable graph.
+- Filtered searches apply the filter the same way, while walking, instead
+  of trimming a fixed beam afterwards, so a selective filter returns every
+  match the graph can reach up to `k`.
+- `SearchParams::ef` was ignored. It now sets the base beam width, falling
+  back to `HnswConfig::ef_search` when unset.
+- A NaN distance with its sign bit set ranked as the best match. Every NaN
+  now ranks after every number.
+
 ### Security
+
+- A huge `k`, `ef`, or `ef_construction` sized heap and hash-set
+  allocations directly, so one request could panic or abort the process.
+  Every search buffer is now sized from the beam width clamped to the
+  number of stored nodes.
+- `HnswConfig::m` is now capped at 1024; larger values are rejected by
+  `HnswIndex::new` with `InvalidConfig`. Each node reserves room for `2 * m`
+  edges, so an unbounded `m` (for example from a corrupt snapshot) could
+  overflow or exhaust memory on the first insert.
+- Inserting past `u32::MAX` stored nodes now returns `InvalidConfig`
+  instead of wrapping the node index.
 
 ---
 
