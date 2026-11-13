@@ -22,6 +22,7 @@
   - [Construction](#construction)
   - [Accessors](#accessors)
   - [The `IndexCore` operations](#the-indexcore-operations)
+  - [Reclaiming deleted nodes](#reclaiming-deleted-nodes)
   - [Diagnostics](#diagnostics)
 - [Result ordering & determinism](#result-ordering--determinism)
 - [Filter handling](#filter-handling)
@@ -117,8 +118,8 @@ The typed configuration consumed by [`Index::new`](#construction). **Derives:**
 |---|---|---|
 | `m` | `16` | Max neighbours per node above layer 0 (`2 * m` at layer 0). Larger ⇒ higher recall, build cost, and memory. |
 | `ef_construction` | `200` | Beam width during insert (Alg 1). Larger ⇒ higher recall at higher build cost; query cost unchanged. Must be `>= m`. |
-| `ef_search` | `64` | Beam width during search (Alg 5); effective width is `max(ef_search, k)`. Larger ⇒ higher recall at higher per-query cost. |
-| `filter_widen` | `4` | Multiplier on the effective beam width when a query carries a filter, to mitigate post-filter under-return. |
+| `ef_search` | `64` | Beam width during search (Alg 5); effective width is `max(ef_search, k)`, or `max(SearchParams::ef, k)` when the query sets `ef`, clamped to the live count. Larger ⇒ higher recall at higher per-query cost. |
+| `filter_widen` | `4` | Multiplier on the effective beam width when a query carries a filter, so more matching nodes near the query are collected before the walk stops. |
 | `seed` | `0xDEADBEEFCAFEF00D` | Seed for the layer-assignment PRNG. Same insert order + seed ⇒ byte-identical graph. |
 
 ```rust
@@ -183,8 +184,10 @@ pub fn new_unconfigured(dim: usize, metric: DistanceMetric, cfg: HnswConfig) -> 
 Build an empty index for `dim`-component vectors compared under `metric`.
 
 **Errors:** [`InvalidConfig`](https://docs.rs/iqdb-types/latest/iqdb_types/enum.IqdbError.html#variant.InvalidConfig)
-on `dim == 0`, `m == 0`, `ef_construction < m`, `ef_search == 0`, or
-`filter_widen == 0`.
+on `dim == 0`, `m == 0`, `m > 1024`, `ef_construction < m`, `ef_search == 0`,
+or `filter_widen == 0`. Large `ef_construction`, `ef_search` and
+`filter_widen` values are accepted: every beam is clamped to the number of
+stored nodes before anything is allocated.
 
 ```rust
 use iqdb_hnsw::{HnswConfig, HnswIndex};
@@ -219,11 +222,15 @@ pub fn config(&self) -> HnswConfig;    // a Copy snapshot of the config
   [`Duplicate`](https://docs.rs/iqdb-types/latest/iqdb_types/enum.IqdbError.html#variant.Duplicate)
   on a repeated id.
 - **`delete(id)`** — tombstones the node: removed from results, retained in
-  traversal for connectivity. Returns
+  traversal for connectivity. A deleted node never enters the result beam,
+  so it cannot crowd out live results. Returns
   [`NotFound`](https://docs.rs/iqdb-types/latest/iqdb_types/enum.IqdbError.html#variant.NotFound)
-  if the id is not live. `len()` decrements.
+  if the id is not live. `len()` decrements. The memory the node holds is
+  freed by [`compact`](#reclaiming-deleted-nodes).
 - **`search(query, params)`** — top-`k` beam search; see
   [Result ordering](#result-ordering--determinism) and [Filter handling](#filter-handling).
+  The base beam width is `params.ef` when set, else `ef_search`; a huge
+  `params.k` is clamped to the live count.
 
 ```rust
 # use std::sync::Arc;
@@ -243,14 +250,53 @@ assert!(hits.iter().all(|h| h.id != VectorId::U64(2))); // tombstoned, never ret
 # Ok(()) }
 ```
 
+### Reclaiming deleted nodes
+
+```rust
+pub fn tombstones(&self) -> usize;
+pub fn compact(&mut self) -> iqdb_types::Result<()>;
+```
+
+`tombstones` is the number of deleted nodes the graph still holds. `compact`
+rebuilds the graph from the live vectors only and frees the deleted ones. Each
+live vector keeps its insertion order (the tie-breaker) and its layer, so
+results stay deterministic for a given history. The cost is close to
+re-inserting the live vectors; with nothing deleted it returns at once, and on
+error the index is left unchanged. A reasonable rule is to compact once
+`tombstones()` passes `len()`.
+
+```rust
+# use std::sync::Arc;
+# use iqdb_hnsw::{HnswConfig, HnswIndex};
+# use iqdb_index::{Index, IndexCore};
+# use iqdb_types::{DistanceMetric, VectorId};
+# fn main() -> iqdb_types::Result<()> {
+let mut idx = HnswIndex::new(2, DistanceMetric::Euclidean, HnswConfig::default())?;
+for i in 0..10u64 {
+    idx.insert(VectorId::from(i), Arc::<[f32]>::from(&[i as f32, 0.0][..]), None)?;
+}
+for i in 0..8u64 {
+    idx.delete(&VectorId::from(i))?;
+}
+if idx.tombstones() > idx.len() {
+    idx.compact()?;
+}
+assert_eq!(idx.tombstones(), 0);
+# Ok(()) }
+```
+
+Inserting past `u32::MAX` stored nodes (live plus deleted) returns
+[`InvalidConfig`](https://docs.rs/iqdb-types/latest/iqdb_types/enum.IqdbError.html#variant.InvalidConfig);
+`compact` frees the slots deleted nodes hold.
+
 ### Diagnostics
 
 ```rust
 pub fn node_layer_histogram(&self) -> Vec<usize>;
 ```
 
-A histogram of assigned top layers across every node ever inserted (including
-tombstoned). `out[L]` is the count of nodes whose top layer is exactly `L`. At a
+A histogram of assigned top layers across every node the index holds (including
+deleted ones not yet freed by `compact`). `out[L]` is the count of nodes whose top layer is exactly `L`. At a
 non-trivial corpus the histogram decays geometrically with rate `1 / m`. Exposed
 for diagnostics and determinism testing; the data it reflects is internal and
 stable only within a given seed.
@@ -277,10 +323,12 @@ results, on every platform.
 ## Filter handling
 
 When `SearchParams::filter` is set, it is evaluated through
-[`iqdb_filter`](https://docs.rs/iqdb-filter) during result collection. HNSW
-filtering is **post-filter**: the beam is widened by
-[`HnswConfig::filter_widen`] (default `4×`) to keep enough survivors, but a highly
-selective filter can still return fewer than `params.k` hits. A malformed filter,
+[`iqdb_filter`](https://docs.rs/iqdb-filter) while the graph is walked: a node
+that fails it is traversed (it keeps the graph connected) but never collected,
+the same way a deleted node is. The beam only stops early once it holds enough
+matching nodes, and is widened by [`HnswConfig::filter_widen`] (default `4×`),
+so the search returns `params.k` hits whenever that many matches are reachable.
+A very selective filter can make the walk cover much of the graph. A malformed filter,
 or one exceeding the `iqdb-filter` depth / `IN`-value caps, returns
 [`InvalidFilter`](https://docs.rs/iqdb-types/latest/iqdb_types/enum.IqdbError.html#variant.InvalidFilter).
 
@@ -317,8 +365,8 @@ assert!(hits.iter().all(|h| h.id == VectorId::U64(1)));
 # Ok(()) }
 ```
 
-For a tighter filter, raise [`HnswConfig::filter_widen`] (or `ef_search`) so the
-widened beam keeps enough survivors to fill `params.k`.
+Raising [`HnswConfig::filter_widen`] (or `ef_search`) collects more matching
+nodes before the walk stops, which raises recall for filtered queries.
 
 ---
 

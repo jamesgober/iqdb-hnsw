@@ -29,9 +29,10 @@
 //! `tombstoned[idx] = true`. `live_count` decrements; `len()`
 //! reports `live_count`. The columnar row and the graph edges are
 //! NOT freed; search treats tombstoned nodes as traversal-only
-//! (their out-edges remain valid neighbours) but never returns
-//! them as Hits. Memory is reclaimed only when the index is
-//! dropped.
+//! (their out-edges remain valid neighbours) and never returns them
+//! as Hits or counts them toward `k`. [`HnswIndex::compact`] rebuilds
+//! the graph from the live rows and frees the deleted ones;
+//! [`HnswIndex::tombstones`] reports how many are waiting.
 
 use std::collections::HashMap;
 use std::mem::size_of;
@@ -44,6 +45,12 @@ use crate::config::HnswConfig;
 use crate::graph::NodeIdx;
 use crate::rng::SplitMix64;
 use crate::{insert as insert_algo, search as search_algo};
+
+/// Largest accepted [`HnswConfig::m`]. Every node reserves room for
+/// `2 * m` layer-0 edges, and real graphs use `m` between 8 and 64, so
+/// this only rejects sizes that would exhaust memory on the first
+/// insert.
+const MAX_M: usize = 1024;
 
 /// Hierarchical Navigable Small World approximate nearest-neighbour
 /// index. Implements both [`iqdb_index::IndexCore`] (object-safe) and
@@ -127,8 +134,10 @@ impl HnswIndex {
     /// under `metric`, using the supplied `cfg`.
     ///
     /// Returns [`IqdbError::InvalidConfig`] on `dim == 0`, `m == 0`,
-    /// `ef_construction < m`, `ef_search == 0`, or
-    /// `filter_widen == 0`.
+    /// `m > 1024`, `ef_construction < m`, `ef_search == 0`, or
+    /// `filter_widen == 0`. Large `ef_construction`, `ef_search`, and
+    /// `filter_widen` values are accepted: every beam is clamped to the
+    /// number of stored nodes before anything is allocated.
     ///
     /// # Examples
     ///
@@ -149,6 +158,11 @@ impl HnswIndex {
         if cfg.m == 0 {
             return Err(IqdbError::InvalidConfig {
                 reason: "HnswConfig.m must be greater than zero",
+            });
+        }
+        if cfg.m > MAX_M {
+            return Err(IqdbError::InvalidConfig {
+                reason: "HnswConfig.m must be at most 1024",
             });
         }
         if cfg.ef_construction < cfg.m {
@@ -219,8 +233,103 @@ impl HnswIndex {
         self.cfg
     }
 
-    /// Histogram of assigned top layers across every node ever
-    /// inserted into this index, including tombstoned ones.
+    /// Number of deleted nodes the graph still holds.
+    ///
+    /// [`delete`](IndexCore::delete) only marks a node as deleted: its
+    /// vector, metadata, and edges stay in place so the graph remains
+    /// connected. They are freed by [`compact`](Self::compact).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use iqdb_hnsw::{HnswConfig, HnswIndex};
+    /// use iqdb_index::{Index, IndexCore};
+    /// use iqdb_types::{DistanceMetric, VectorId};
+    ///
+    /// # fn main() -> iqdb_types::Result<()> {
+    /// let mut idx = HnswIndex::new(2, DistanceMetric::Euclidean, HnswConfig::default())?;
+    /// idx.insert(VectorId::from(1u64), Arc::<[f32]>::from(&[0.0, 0.0][..]), None)?;
+    /// idx.delete(&VectorId::from(1u64))?;
+    /// assert_eq!(idx.tombstones(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn tombstones(&self) -> usize {
+        self.vectors.len() - self.live_count
+    }
+
+    /// Rebuild the graph from the live vectors only, freeing every
+    /// deleted node.
+    ///
+    /// Deleted nodes cost memory and search time until they are
+    /// reclaimed. Call this after a delete- or update-heavy phase, for
+    /// example once [`tombstones`](Self::tombstones) exceeds
+    /// [`len`](Self::len). Each live vector keeps its insertion order
+    /// (the tie-breaker) and its assigned layer, so results stay
+    /// deterministic for a given history. The cost is close to
+    /// re-inserting the live vectors. With nothing deleted it returns
+    /// at once. On error the index is left unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a distance-kernel error from the rebuild, which the
+    /// index's own invariants make unreachable in practice.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use iqdb_hnsw::{HnswConfig, HnswIndex};
+    /// use iqdb_index::{Index, IndexCore};
+    /// use iqdb_types::{DistanceMetric, SearchParams, VectorId};
+    ///
+    /// # fn main() -> iqdb_types::Result<()> {
+    /// let mut idx = HnswIndex::new(2, DistanceMetric::Euclidean, HnswConfig::default())?;
+    /// for i in 0..10u64 {
+    ///     idx.insert(VectorId::from(i), Arc::<[f32]>::from(&[i as f32, 0.0][..]), None)?;
+    /// }
+    /// for i in 0..8u64 {
+    ///     idx.delete(&VectorId::from(i))?;
+    /// }
+    /// idx.compact()?;
+    /// assert_eq!(idx.tombstones(), 0);
+    /// assert_eq!(idx.len(), 2);
+    /// let hits = idx.search(&[0.0, 0.0], &SearchParams::new(1, DistanceMetric::Euclidean))?;
+    /// assert_eq!(hits[0].id, VectorId::U64(8));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn compact(&mut self) -> Result<()> {
+        if self.tombstones() == 0 {
+            return Ok(());
+        }
+        let mut fresh = Self::new_unconfigured(self.dim, self.metric, self.cfg)?;
+        fresh.rng = self.rng.clone();
+        fresh.next_seq = self.next_seq;
+        for node in 0..self.vectors.len() {
+            if self.tombstoned[node] {
+                continue;
+            }
+            insert_algo::link_node(
+                &mut fresh,
+                self.ids[node].clone(),
+                Arc::clone(&self.vectors[node]),
+                self.metadata[node].clone(),
+                self.seqs[node],
+                self.node_layer[node],
+            )?;
+        }
+        *self = fresh;
+        Ok(())
+    }
+
+    /// Histogram of assigned top layers across every node the index
+    /// holds, including deleted ones not yet freed by
+    /// [`compact`](Self::compact).
     ///
     /// The returned `Vec` is indexed by layer: `out[L]` is the count
     /// of nodes whose top layer is exactly `L`. Length equals
@@ -338,11 +447,12 @@ impl IndexCore for HnswIndex {
     /// [`iqdb_filter::MAX_FILTER_DEPTH`] / [`iqdb_filter::MAX_IN_VALUES`]
     /// caps.
     ///
-    /// **Limitation:** when `params.filter.is_some()`, post-filter
-    /// may return fewer than `params.k` hits if the filter is highly
-    /// selective. The internal beam is widened by
-    /// `HnswConfig::filter_widen` to mitigate. See the crate
-    /// `README.md` "Filter handling" section.
+    /// The base beam width is `params.ef` when set, else
+    /// [`HnswConfig::ef_search`]. Deleted nodes and nodes that fail
+    /// `params.filter` are walked through but never collected, so the
+    /// search returns `params.k` hits whenever that many matching live
+    /// vectors are reachable in the graph. A huge `params.k` is clamped
+    /// to the live count.
     fn search(&self, query: &[f32], params: &SearchParams) -> Result<Vec<Hit>> {
         search_algo::search(self, query, params)
     }

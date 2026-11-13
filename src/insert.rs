@@ -26,9 +26,11 @@ use crate::topk::{Scored, take_topk_sorted};
 ///
 /// Returns [`IqdbError::DimensionMismatch`] for a vector that does
 /// not match `idx.dim`, [`IqdbError::Duplicate`] for an already-known
-/// id, and [`IqdbError::InvalidConfig`] for an internal sequence
-/// counter overflow (a contract violation reachable only after
-/// `u64::MAX` inserts on a single index).
+/// id, and [`IqdbError::InvalidConfig`] when the index already holds
+/// `u32::MAX` nodes (live plus deleted; [`HnswIndex::compact`] frees
+/// the deleted ones) or for an internal sequence counter overflow (a
+/// contract violation reachable only after `u64::MAX` inserts on a
+/// single index).
 pub(crate) fn insert_node(
     idx: &mut HnswIndex,
     id: VectorId,
@@ -38,6 +40,12 @@ pub(crate) fn insert_node(
     idx.check_dim(vector.len())?;
     if idx.id_to_node.contains_key(&id) {
         return Err(IqdbError::Duplicate);
+    }
+    // Node slots are addressed by `u32`; refuse rather than wrap.
+    if idx.vectors.len() >= NodeIdx::MAX as usize {
+        return Err(IqdbError::InvalidConfig {
+            reason: "HnswIndex holds u32::MAX nodes; call compact() to reclaim deleted ones",
+        });
     }
 
     let seq = idx.next_seq;
@@ -50,7 +58,21 @@ pub(crate) fn insert_node(
     idx.next_seq = next_seq;
 
     let layer = pick_layer(&mut idx.rng, idx.m_l_inv);
+    link_node(idx, id, vector, metadata, seq, layer)
+}
 
+/// Store a row with a known `seq` and top `layer` and wire it into the
+/// graph. The caller has already checked the dimension, the id, and the
+/// node-slot limit. [`insert_node`] draws `seq` and `layer` fresh;
+/// [`HnswIndex::compact`] replays the stored ones.
+pub(crate) fn link_node(
+    idx: &mut HnswIndex,
+    id: VectorId,
+    vector: Arc<[f32]>,
+    metadata: Option<Metadata>,
+    seq: u64,
+    layer: u8,
+) -> Result<()> {
     // Allocate row + empty per-layer adjacency. The new node sits at
     // every layer `0..=layer`.
     let new_node: NodeIdx = idx.vectors.len() as NodeIdx;
@@ -90,7 +112,7 @@ pub(crate) fn insert_node(
     if top > layer {
         let mut lc = top;
         while lc > layer {
-            let result_heap = search_layer(idx, &vector, &[cur], lc, 1)?;
+            let result_heap = search_layer(idx, &vector, &[cur], lc, 1, None)?;
             if let Some(nearest) = result_heap.iter().min().copied() {
                 cur = nearest;
             }
@@ -103,7 +125,14 @@ pub(crate) fn insert_node(
     let start_lc = layer.min(top);
     let mut lc = start_lc;
     loop {
-        let result_heap = search_layer(idx, &vector, &entry_points, lc, idx.cfg.ef_construction)?;
+        let result_heap = search_layer(
+            idx,
+            &vector,
+            &entry_points,
+            lc,
+            idx.cfg.ef_construction,
+            None,
+        )?;
         let w_sorted = take_topk_sorted(result_heap, idx.cfg.ef_construction);
 
         let live_candidates: Vec<Scored> = w_sorted

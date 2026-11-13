@@ -31,13 +31,16 @@
 //!   heuristic on any neighbour that overflows its cap.
 //! - Search (Alg 5) greedy-descends from the global entry through
 //!   the upper layers with `ef = 1`, then runs SEARCH-LAYER (Alg 2)
-//!   at layer 0 with `ef = max(ef_search, k)`.
+//!   at layer 0 with `ef = max(SearchParams::ef or ef_search, k)`,
+//!   clamped to the live count.
 //! - Delete is tombstone-only. Tombstoned nodes stay in graph
-//!   traversal for connectivity but are never returned as `Hit`s.
-//! - Filter handling is post-filter via
-//!   [`iqdb_filter::FilterEvaluator`]. The beam widens by
-//!   [`HnswConfig::filter_widen`] when a filter is present;
-//!   selective filters can still under-return.
+//!   traversal for connectivity but never enter the result beam, so
+//!   they cannot crowd out live results.
+//!   [`HnswIndex::compact`] rebuilds the graph without them.
+//! - Filters are applied during traversal via
+//!   [`iqdb_filter::FilterEvaluator`]: a node that fails the filter is
+//!   walked through but not collected. The beam widens by
+//!   [`HnswConfig::filter_widen`] when a filter is present.
 //!
 //! ## Example
 //!
